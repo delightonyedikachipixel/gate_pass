@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Checkpoint — Gate Pass System</title>
+<style>
+:root{
+  --ink:#12181f; --paper:#f3f1ea; --line:#d8d3c4; --amber:#c8892b; --amber-dk:#95611c;
+  --ok:#2f6b4f; --bad:#a5392b; --muted:#6b6656;
+  padding-top:env(safe-area-inset-top,0px); padding-bottom:env(safe-area-inset-bottom,0px);
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){--ink:#eee9dc;--paper:#171a16;--line:#3a3a32;--muted:#a39d89;}
+}
+:root[data-theme="dark"]{--ink:#eee9dc;--paper:#171a16;--line:#3a3a32;--muted:#a39d89;}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.5 "Courier New",ui-monospace,monospace;}
+header{border-bottom:2px solid var(--ink);padding:18px 20px;display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
+header h1{font-size:19px;margin:0;letter-spacing:.02em}
+header h1 span{color:var(--amber-dk)}
+.urlbar{display:flex;gap:6px;align-items:center;font-size:12px;color:var(--muted)}
+.urlbar input{font:inherit;background:transparent;border:1px solid var(--line);border-radius:3px;padding:5px 7px;color:var(--ink);width:190px}
+nav{display:flex;gap:2px;overflow-x:auto;border-bottom:1px solid var(--line);padding:0 20px}
+nav button{font:inherit;background:none;border:none;padding:10px 14px;cursor:pointer;color:var(--muted);border-bottom:2px solid transparent;white-space:nowrap}
+nav button.on{color:var(--ink);border-bottom-color:var(--amber)}
+main{max-width:960px;margin:0 auto;padding:22px 20px 60px}
+h2{font-size:15px;text-transform:uppercase;letter-spacing:.08em;border-bottom:1px solid var(--line);padding-bottom:8px;margin:0 0 14px}
+.card{border:1px solid var(--line);border-radius:4px;padding:14px;margin-bottom:20px}
+form{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:8px;align-items:end}
+label{display:block;font-size:11px;color:var(--muted);margin-bottom:3px}
+input,select{width:100%;font:inherit;padding:7px 8px;border:1px solid var(--line);border-radius:3px;background:var(--paper);color:var(--ink)}
+button.act{font:inherit;background:var(--ink);color:var(--paper);border:1px solid var(--ink);border-radius:3px;padding:7px 12px;cursor:pointer}
+button.act:hover{background:var(--amber-dk);border-color:var(--amber-dk)}
+button.ghost{background:transparent;color:var(--ink);font-size:12px;padding:4px 8px}
+button.bad{background:var(--bad);border-color:var(--bad)}
+table{width:100%;border-collapse:collapse;font-size:13px;margin-top:4px}
+th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--muted);font-weight:normal;font-size:11px;text-transform:uppercase}
+.tag{display:inline-block;padding:1px 7px;border-radius:99px;font-size:11px;border:1px solid var(--line)}
+.PENDING{color:var(--amber-dk)} .APPROVED,.ACTIVE{color:var(--ok)} .REJECTED,.REVOKED,.EXPIRED{color:var(--bad)}
+.row-actions{display:flex;gap:4px;flex-wrap:wrap}
+.msg{font-size:12px;margin-top:8px;min-height:14px}
+.msg.err{color:var(--bad)} .msg.ok{color:var(--ok)}
+.empty{color:var(--muted);font-size:13px;padding:8px 0}
+</style>
+</head>
+<body>
+<header>
+  <h1>Checkpoint <span>/ Gate Pass System</span></h1>
+  <div class="urlbar">
+    API base
+    <input id="apiBase" value="http://127.0.0.1:8000">
+    <button class="act" id="pingBtn" style="padding:5px 10px">Connect</button>
+    <span id="pingStat"></span>
+  </div>
+</header>
+<nav id="tabs"></nav>
+<main id="view"></main>
+
+<script>
+const $ = s=>document.querySelector(s);
+const els = {};
+const SECTIONS = [
+  {id:'passes', label:'Gate Passes'},
+  {id:'visitors', label:'Visitors'},
+  {id:'vehicles', label:'Vehicles'},
+  {id:'gates', label:'Gates'},
+  {id:'users', label:'Users'},
+  {id:'logs', label:'Gate Logs'},
+];
+let active = 'passes';
+let cache = {users:[], visitors:[], vehicles:[], gates:[]};
+
+function base(){ return ($('#apiBase').value||'').replace(/\/$/,''); }
+async function api(path, opts={}){
+  const res = await fetch(base()+path, {
+    headers:{'Content-Type':'application/json'}, ...opts
+  });
+  let body = null;
+  try{ body = await res.json(); }catch(e){}
+  if(!res.ok){
+    const detail = body && (body.detail || JSON.stringify(body)) || res.statusText;
+    throw new Error(typeof detail==='string' ? detail : JSON.stringify(detail));
+  }
+  return body;
+}
+function fmt(dt){ if(!dt) return ''; try{return new Date(dt).toLocaleString();}catch(e){return dt;} }
+function opts(list, valKey, labelFn){
+  return list.map(x=>`<option value="${x[valKey]}">${labelFn(x)}</option>`).join('');
+}
+function setMsg(el, text, ok){ el.textContent=text; el.className='msg '+(ok?'ok':'err'); }
+
+async function refreshLookups(){
+  try{
+    const [u,v,ve,g] = await Promise.all([
+      api('/users/'), api('/visitors/'), api('/vehicles/'), api('/gates/')
+    ]);
+    cache.users=u; cache.visitors=v; cache.vehicles=ve; cache.gates=g;
+  }catch(e){ /* backend not reachable yet */ }
+}
+
+function renderTabs(){
+  $('#tabs').innerHTML = SECTIONS.map(s=>
+    `<button data-id="${s.id}" class="${s.id===active?'on':''}">${s.label}</button>`
+  ).join('');
+  $('#tabs').querySelectorAll('button').forEach(b=>
+    b.onclick=()=>{active=b.dataset.id; renderTabs(); render();}
+  );
+}
+
+async function render(){
+  const view = $('#view');
+  if(active==='passes') return renderPasses(view);
+  if(active==='visitors') return renderVisitors(view);
+  if(active==='vehicles') return renderVehicles(view);
+  if(active==='gates') return renderGates(view);
+  if(active==='users') return renderUsers(view);
+  if(active==='logs') return renderLogs(view);
+}
+
+// ---------- Gate Passes ----------
+async function renderPasses(view){
+  await refreshLookups();
+  view.innerHTML = `
+    <h2>Request a gate pass</h2>
+    <div class="card">
+      <form id="passForm">
+        <div><label>Type</label><select id="pType">
+          <option value="VISITOR">Visitor</option>
+          <option value="VEHICLE">Vehicle</option>
+          <option value="VISITOR_WITH_VEHICLE">Visitor + Vehicle</option>
+        </select></div>
+        <div><label>Requested by (user)</label><select id="pUser">${opts(cache.users,'id',x=>x.full_name)}</select></div>
+        <div id="pVisitorWrap"><label>Visitor</label><select id="pVisitor">${opts(cache.visitors,'id',x=>x.full_name)}</select></div>
+        <div id="pVehicleWrap"><label>Vehicle</label><select id="pVehicle">${opts(cache.vehicles,'id',x=>x.plate_number)}</select></div>
+        <div><label>Purpose</label><input id="pPurpose" placeholder="e.g. delivery"></div>
+        <div><label>Valid from</label><input id="pFrom" type="datetime-local"></div>
+        <div><label>Valid to</label><input id="pTo" type="datetime-local"></div>
+        <div><label>Multi-entry</label><select id="pMulti"><option value="false">No</option><option value="true">Yes</option></select></div>
+        <div><button class="act" type="submit">Request pass</button></div>
+      </form>
+      <div class="msg" id="pMsg"></div>
+    </div>
+    <h2>Verify a pass code</h2>
+    <div class="card">
+      <form id="verifyForm" style="grid-template-columns:1fr auto">
+        <div><label>Pass code</label><input id="vCode" placeholder="e.g. GP-XXXX"></div>
+        <div><button class="act" type="submit">Verify</button></div>
+      </form>
+      <div class="msg" id="vMsg"></div>
+    </div>
+    <h2>All passes</h2>
+    <div class="card"><div id="passList" class="empty">Loading…</div></div>
+  `;
+  $('#pType').onchange = ()=>{
+    const t=$('#pType').value;
+    $('#pVisitorWrap').style.display = (t==='VISITOR'||t==='VISITOR_WITH_VEHICLE')?'':'none';
+    $('#pVehicleWrap').style.display = (t==='VEHICLE'||t==='VISITOR_WITH_VEHICLE')?'':'none';
+  };
+  $('#pType').onchange();
+
+  $('#passForm').onsubmit = async e=>{
+    e.preventDefault();
+    const msg=$('#pMsg');
+    try{
+      const t=$('#pType').value;
+      const payload = {
+        type:t, purpose:$('#pPurpose').value||null,
+        valid_from:new Date($('#pFrom').value).toISOString(),
+        valid_to:new Date($('#pTo').value).toISOString(),
+        is_multi_entry: $('#pMulti').value==='true',
+        requested_by_id:$('#pUser').value,
+        visitor_id:(t==='VISITOR'||t==='VISITOR_WITH_VEHICLE')?$('#pVisitor').value:null,
+        vehicle_id:(t==='VEHICLE'||t==='VISITOR_WITH_VEHICLE')?$('#pVehicle').value:null,
+      };
+      await api('/gate-passes/', {method:'POST', body:JSON.stringify(payload)});
+      setMsg(msg,'Pass requested.',true);
+      loadPasses();
+    }catch(err){ setMsg(msg, err.message, false); }
+  };
+
+  $('#verifyForm').onsubmit = async e=>{
+    e.preventDefault();
+    const msg=$('#vMsg');
+    try{
+      const p = await api('/gate-passes/verify/'+encodeURIComponent($('#vCode').value.trim()));
+      setMsg(msg, `${p.status} — ${p.type} — valid ${fmt(p.valid_from)} to ${fmt(p.valid_to)}`, true);
+    }catch(err){ setMsg(msg, err.message, false); }
+  };
+
+  loadPasses();
+}
+async function loadPasses(){
+  const el = $('#passList'); if(!el) return;
+  try{
+    const list = await api('/gate-passes/');
+    if(!list.length){ el.innerHTML='<div class="empty">No passes yet.</div>'; return; }
+    el.innerHTML = `<table><thead><tr><th>Code</th><th>Type</th><th>Status</th><th>Who</th><th>Window</th><th></th></tr></thead>
+      <tbody>${list.map(p=>`
+        <tr>
+          <td>${p.pass_code}</td>
+          <td>${p.type}</td>
+          <td><span class="tag ${p.status}">${p.status}</span></td>
+          <td>${p.visitor?p.visitor.full_name:''}${p.vehicle?(p.visitor?' / ':'')+p.vehicle.plate_number:''}</td>
+          <td>${fmt(p.valid_from)}<br>→ ${fmt(p.valid_to)}</td>
+          <td class="row-actions">
+            ${p.status==='PENDING'?`<button class="act ghost" onclick="decidePass('${p.id}','approve')">Approve</button>
+            <button class="act ghost bad" onclick="decidePass('${p.id}','reject')">Reject</button>`:''}
+            ${['APPROVED','ACTIVE'].includes(p.status)?`<button class="act ghost bad" onclick="revokePass('${p.id}')">Revoke</button>`:''}
+          </td>
+        </tr>`).join('')}</tbody></table>`;
+  }catch(e){ el.innerHTML = `<div class="empty">Could not load passes — ${e.message}</div>`; }
+}
+window.decidePass = async (id, action)=>{
+  if(!cache.users.length){ alert('No users loaded to act as approver.'); return; }
+  const approver = cache.users[0].id;
+  try{
+    await api(`/gate-passes/${id}/${action}`, {method:'POST', body:JSON.stringify({approver_id:approver})});
+    loadPasses();
+  }catch(e){ alert(e.message); }
+};
+window.revokePass = async (id)=>{
+  const reason = prompt('Reason for revoking?') || null;
+  try{
+    await api(`/gate-passes/${id}/revoke`, {method:'POST', body:JSON.stringify({reason})});
+    loadPasses();
+  }catch(e){ alert(e.message); }
+};
+
+// ---------- Visitors ----------
+async function renderVisitors(view){
+  view.innerHTML = `
+    <h2>Register a visitor</h2>
+    <div class="card">
+      <form id="vForm">
+        <div><label>Full name</label><input id="vName" required></div>
+        <div><label>Phone</label><input id="vPhone"></div>
+        <div><label>ID type</label><input id="vIdType" placeholder="e.g. NIN"></div>
+        <div><label>ID number</label><input id="vIdNum"></div>
+        <div><label>Company</label><input id="vCompany"></div>
+        <div><button class="act" type="submit">Register</button></div>
+      </form>
+      <div class="msg" id="vMsgReg"></div>
+    </div>
+    <h2>Visitors</h2>
+    <div class="card"><div id="visitorList" class="empty">Loading…</div></div>
+  `;
+  $('#vForm').onsubmit = async e=>{
+    e.preventDefault();
+    const msg=$('#vMsgReg');
+    try{
+      await api('/visitors/', {method:'POST', body:JSON.stringify({
+        full_name:$('#vName').value, phone:$('#vPhone').value||null,
+        id_type:$('#vIdType').value||null, id_number:$('#vIdNum').value||null,
+        company_name:$('#vCompany').value||null,
+      })});
+      setMsg(msg,'Visitor registered.',true);
+      $('#vForm').reset();
+      loadVisitors();
+    }catch(err){ setMsg(msg, err.message, false); }
+  };
+  loadVisitors();
+}
+async function loadVisitors(){
+  const el = $('#visitorList'); if(!el) return;
+  try{
+    const list = await api('/visitors/');
+    if(!list.length){ el.innerHTML='<div class="empty">No visitors yet.</div>'; return; }
+    el.innerHTML = `<table><thead><tr><th>Name</th><th>Phone</th><th>Company</th><th>Status</th><th></th></tr></thead>
+      <tbody>${list.map(v=>`
+        <tr><td>${v.full_name}</td><td>${v.phone||''}</td><td>${v.company_name||''}</td>
+        <td>${v.is_blacklisted?'<span class="tag REJECTED">Blacklisted</span>':'<span class="tag APPROVED">Clear</span>'}</td>
+        <td><button class="act ghost" onclick="toggleBlack('visitors','${v.id}',${!v.is_blacklisted})">${v.is_blacklisted?'Clear':'Blacklist'}</button></td>
+        </tr>`).join('')}</tbody></table>`;
+  }catch(e){ el.innerHTML = `<div class="empty">Could not load — ${e.message}</div>`; }
+}
+
+// ---------- Vehicles ----------
+async function renderVehicles(view){
+  view.innerHTML = `
+    <h2>Register a vehicle</h2>
+    <div class="card">
+      <form id="veForm">
+        <div><label>Plate number</label><input id="vePlate" required></div>
+        <div><label>Type</label><select id="veType">
+          <option value="CAR">Car</option><option value="TRUCK">Truck</option>
+          <option value="MOTORCYCLE">Motorcycle</option><option value="DELIVERY_VAN">Delivery van</option>
+        </select></div>
+        <div><label>Color</label><input id="veColor"></div>
+        <div><label>Owner name</label><input id="veOwner"></div>
+        <div><button class="act" type="submit">Register</button></div>
+      </form>
+      <div class="msg" id="veMsg"></div>
+    </div>
+    <h2>Vehicles</h2>
+    <div class="card"><div id="vehicleList" class="empty">Loading…</div></div>
+  `;
+  $('#veForm').onsubmit = async e=>{
+    e.preventDefault();
+    const msg=$('#veMsg');
+    try{
+      await api('/vehicles/', {method:'POST', body:JSON.stringify({
+        plate_number:$('#vePlate').value, type:$('#veType').value,
+        color:$('#veColor').value||null, owner_name:$('#veOwner').value||null,
+      })});
+      setMsg(msg,'Vehicle registered.',true);
+      $('#veForm').reset();
+      loadVehicles();
+    }catch(err){ setMsg(msg, err.message, false); }
+  };
+  loadVehicles();
+}
+async function loadVehicles(){
+  const el = $('#vehicleList'); if(!el) return;
+  try{
+    const list = await api('/vehicles/');
+    if(!list.length){ el.innerHTML='<div class="empty">No vehicles yet.</div>'; return; }
+    el.innerHTML = `<table><thead><tr><th>Plate</th><th>Type</th><th>Owner</th><th>Status</th><th></th></tr></thead>
+      <tbody>${list.map(v=>`
+        <tr><td>${v.plate_number}</td><td>${v.type}</td><td>${v.owner_name||''}</td>
+        <td>${v.is_blacklisted?'<span class="tag REJECTED">Blacklisted</span>':'<span class="tag APPROVED">Clear</span>'}</td>
+        <td><button class="act ghost" onclick="toggleBlack('vehicles','${v.id}',${!v.is_blacklisted})">${v.is_blacklisted?'Clear':'Blacklist'}</button></td>
+        </tr>`).join('')}</tbody></table>`;
+  }catch(e){ el.innerHTML = `<div class="empty">Could not load — ${e.message}</div>`; }
+}
+window.toggleBlack = async (kind, id, val)=>{
+  try{
+    await api(`/${kind}/${id}/blacklist?blacklisted=${val}`, {method:'PATCH'});
+    kind==='visitors' ? loadVisitors() : loadVehicles();
+  }catch(e){ alert(e.message); }
+};
+
+// ---------- Gates ----------
+async function renderGates(view){
+  view.innerHTML = `
+    <h2>Add a gate</h2>
+    <div class="card">
+      <form id="gForm">
+        <div><label>Name</label><input id="gName" required placeholder="e.g. Main Gate"></div>
+        <div><label>Location</label><input id="gLoc"></div>
+        <div><button class="act" type="submit">Add gate</button></div>
+      </form>
+      <div class="msg" id="gMsg"></div>
+    </div>
+    <h2>Gates</h2>
+    <div class="card"><div id="gateList" class="empty">Loading…</div></div>
+  `;
+  $('#gForm').onsubmit = async e=>{
+    e.preventDefault();
+    const msg=$('#gMsg');
+    try{
+      await api('/gates/', {method:'POST', body:JSON.stringify({name:$('#gName').value, location:$('#gLoc').value||null})});
+      setMsg(msg,'Gate added.',true);
+      $('#gForm').reset();
+      loadGates();
+    }catch(err){ setMsg(msg, err.message, false); }
+  };
+  loadGates();
+}
+async function loadGates(){
+  const el = $('#gateList'); if(!el) return;
+  try{
+    const list = await api('/gates/');
+    if(!list.length){ el.innerHTML='<div class="empty">No gates yet.</div>'; return; }
+    el.innerHTML = `<table><thead><tr><th>Name</th><th>Location</th><th>Active</th></tr></thead>
+      <tbody>${list.map(g=>`<tr><td>${g.name}</td><td>${g.location||''}</td><td>${g.is_active?'Yes':'No'}</td></tr>`).join('')}</tbody></table>`;
+  }catch(e){ el.innerHTML = `<div class="empty">Could not load — ${e.message}</div>`; }
+}
+
+// ---------- Users ----------
+async function renderUsers(view){
+  view.innerHTML = `
+    <h2>Add a user</h2>
+    <div class="card">
+      <form id="uForm">
+        <div><label>Full name</label><input id="uName" required></div>
+        <div><label>Email</label><input id="uEmail" type="email" required></div>
+        <div><label>Role</label><select id="uRole">
+          <option value="ADMIN">Admin</option><option value="SECURITY">Security</option><option value="HOST_APPROVER">Host approver</option>
+        </select></div>
+        <div><label>Phone</label><input id="uPhone"></div>
+        <div><label>Password</label><input id="uPass" type="password" required></div>
+        <div><button class="act" type="submit">Add user</button></div>
+      </form>
+      <div class="msg" id="uMsg"></div>
+    </div>
+    <h2>Users</h2>
+    <div class="card"><div id="userList" class="empty">Loading…</div></div>
+  `;
+  $('#uForm').onsubmit = async e=>{
+    e.preventDefault();
+    const msg=$('#uMsg');
+    try{
+      await api('/users/', {method:'POST', body:JSON.stringify({
+        full_name:$('#uName').value, email:$('#uEmail').value, role:$('#uRole').value,
+        phone:$('#uPhone').value||null, password:$('#uPass').value,
+      })});
+      setMsg(msg,'User added.',true);
+      $('#uForm').reset();
+      loadUsers();
+    }catch(err){ setMsg(msg, err.message, false); }
+  };
+  loadUsers();
+}
+async function loadUsers(){
+  const el = $('#userList'); if(!el) return;
+  try{
+    const list = await api('/users/');
+    if(!list.length){ el.innerHTML='<div class="empty">No users yet.</div>'; return; }
+    el.innerHTML = `<table><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Since</th></tr></thead>
+      <tbody>${list.map(u=>`<tr><td>${u.full_name}</td><td>${u.email}</td><td>${u.role}</td><td>${fmt(u.created_at)}</td></tr>`).join('')}</tbody></table>`;
+  }catch(e){ el.innerHTML = `<div class="empty">Could not load — ${e.message}</div>`; }
+}
+
+// ---------- Gate Logs ----------
+async function renderLogs(view){
+  await refreshLookups();
+  view.innerHTML = `
+    <h2>Record entry / exit</h2>
+    <div class="card">
+      <form id="lForm">
+        <div><label>Gate pass code / id</label><input id="lPass" placeholder="pass id"></div>
+        <div><label>Gate</label><select id="lGate">${opts(cache.gates,'id',x=>x.name)}</select></div>
+        <div><label>Scanned by (user)</label><select id="lUser">${opts(cache.users,'id',x=>x.full_name)}</select></div>
+        <div><label>Direction</label><select id="lDir"><option value="ENTRY">Entry</option><option value="EXIT">Exit</option></select></div>
+        <div><label>Notes</label><input id="lNotes"></div>
+        <div><button class="act" type="submit">Record</button></div>
+      </form>
+      <div class="msg" id="lMsg"></div>
+      <p style="font-size:11px;color:var(--muted);margin-top:6px">Tip: open Gate Passes to copy a pass's id (not its printed code) if the API expects the internal id.</p>
+    </div>
+    <h2>Log history</h2>
+    <div class="card"><div id="logList" class="empty">Loading…</div></div>
+  `;
+  $('#lForm').onsubmit = async e=>{
+    e.preventDefault();
+    const msg=$('#lMsg');
+    const dir = $('#lDir').value;
+    try{
+      await api(`/gate-logs/${dir==='ENTRY'?'entry':'exit'}`, {method:'POST', body:JSON.stringify({
+        gate_pass_id:$('#lPass').value, gate_id:$('#lGate').value,
+        scanned_by_id:$('#lUser').value, direction:dir, notes:$('#lNotes').value||null,
+      })});
+      setMsg(msg,'Logged.',true);
+      $('#lForm').reset();
+      loadLogs();
+    }catch(err){ setMsg(msg, err.message, false); }
+  };
+  loadLogs();
+}
+async function loadLogs(){
+  const el = $('#logList'); if(!el) return;
+  try{
+    const list = await api('/gate-logs/');
+    if(!list.length){ el.innerHTML='<div class="empty">No log entries yet.</div>'; return; }
+    el.innerHTML = `<table><thead><tr><th>Time</th><th>Direction</th><th>Gate</th><th>Notes</th></tr></thead>
+      <tbody>${list.map(l=>`<tr><td>${fmt(l.timestamp)}</td><td>${l.direction}</td><td>${l.gate_id}</td><td>${l.notes||''}</td></tr>`).join('')}</tbody></table>`;
+  }catch(e){ el.innerHTML = `<div class="empty">Could not load — ${e.message}</div>`; }
+}
+
+// ---------- boot ----------
+$('#pingBtn').onclick = async ()=>{
+  const stat = $('#pingStat');
+  try{ await api('/'); stat.textContent='● connected'; stat.style.color='var(--ok)'; render(); }
+  catch(e){ stat.textContent='● unreachable'; stat.style.color='var(--bad)'; }
+};
+renderTabs();
+render();
+</script>
+</body>
+</html>
